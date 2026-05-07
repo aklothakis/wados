@@ -30,7 +30,7 @@ jobs:
           python -m pip install --upgrade pip
           # Headless-CI subset: skip GUI / CAD packages that the
           # library test suites do not import (PyQt5, cadquery).
-          pip install numpy scipy pandas matplotlib scikit-learn pytest
+          pip install numpy scipy pandas matplotlib scikit-learn pytest pyyaml
           # Vendored aero solver dependencies
           pip install numpy-stl trimesh
 
