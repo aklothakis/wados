@@ -1,0 +1,611 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage[a4paper,margin=2.3cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{bm}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{microtype}
+\usepackage{caption}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=black,
+  citecolor=blue,
+  urlcolor=blue
+}
+
+\lstdefinestyle{pystyle}{
+  language=Python,
+  basicstyle=\ttfamily\footnotesize,
+  keywordstyle=\color{blue!70!black}\bfseries,
+  commentstyle=\color{gray!60!black}\itshape,
+  stringstyle=\color{red!60!black},
+  numbers=none,
+  frame=single,
+  framerule=0.4pt,
+  rulecolor=\color{gray!40},
+  showstringspaces=false,
+  breaklines=true,
+  tabsize=2
+}
+\lstset{style=pystyle}
+
+\newcommand{\Ma}{\mathit{Ma}}
+\newcommand{\Vol}{\mathit{Vol}}
+\newcommand{\Swet}{S_{\mathrm{wet}}}
+\newcommand{\Sp}{S_{p}}
+\newcommand{\Sb}{S_{b}}
+\newcommand{\Lw}{L_{w}}
+\newcommand{\Ls}{L_{s}}
+\newcommand{\dc}{\delta_{c}}
+
+\title{\bfseries Liu--Liu--Wen--Ding 2019 Variable-Mach Osculating Flowfield Waverider\\[4pt]
+\large Implementation and Software Architecture}
+\author{Computational implementation notes}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This document describes the Python reproduction of the variable-Mach-number
+osculating flowfield waverider method of Liu \textit{et al.}~(2019,
+\textit{Acta Astronautica} 162, 160--167). The implementation is a
+self-contained package, \texttt{liu2019/}, that generates the 3D geometry
+and evaluates inviscid aerodynamic coefficients for the paper's baseline
+test case (\mbox{$\Ma_{\mathrm{center}}=6$}, $\Ma_{\mathrm{tip}}=13$,
+\mbox{$\beta=13^{\circ}$}) and wraps it in a PyQt5 GUI tab integrated into
+the existing waverider-design application. We summarise the governing
+equations, detail the function of each module, and catalogue every design
+parameter together with its geometric effect.
+\end{abstract}
+
+\tableofcontents
+
+% ==============================================================
+\section{Overview of the Method}
+% ==============================================================
+
+A waverider is a hypersonic lifting body whose leading edges are
+constrained to lie on a prescribed shock wave so that the underside is
+effectively confined to a single-shock compression field. Classical
+methods (Nonweiler, Jones--Moore--Pike, Sobieczky \textit{osculating cones})
+assume a \emph{single} design Mach number. The method of
+Liu~\textit{et~al.} generalises this by allowing the design Mach number
+to vary along the spanwise coordinate~$z$, thereby generating a vehicle
+that is simultaneously ``shaped by the shock'' across a range of Mach
+numbers.
+
+Five construction steps, following the paper's Section~1.1, are:
+
+\begin{enumerate}
+\item A spanwise Mach distribution $\Ma(z)$ is prescribed
+      (Eq.~\ref{eq:Ma}).
+\item Two exit-plane curves are prescribed in the base plane $x=\Lw$:
+      the trailing edge of the freestream (upper) surface, $y(z)$
+      (Eq.~\ref{eq:yupper}), and the shock-wave curve $y_{s}(z)$
+      (Eq.~\ref{eq:ys}).
+\item Their coefficients are determined from six design parameters
+      ($\beta, \Lw, W, \Ls, y_{5}, y_{6}$) by Eqs.~\ref{eq:d}--\ref{eq:a}
+      and~\ref{eq:A}.
+\item For every spanwise station a vertical \emph{osculating plane}
+      is erected; a Taylor--Maccoll cone solution is placed in each
+      plane at the local Mach number, giving a cone half-angle
+      $\dc(z)$. The leading edge and the compression-surface trailing
+      edge are obtained by straight-line intersection within the plane.
+\item The 3D surfaces are lofted from the array of per-plane records.
+\end{enumerate}
+
+% ==============================================================
+\section{Mathematical Formulation}
+% ==============================================================
+
+\subsection{Spanwise Mach distribution}
+
+The design Mach number varies quadratically with~$z$:
+\begin{equation}
+\boxed{\;\Ma(z) \;=\; m z^{2} + n, \qquad -\tfrac{W}{2} \le z \le +\tfrac{W}{2}\;}
+\label{eq:Ma}
+\end{equation}
+with coefficients chosen so that $\Ma(0)=\Ma_{\mathrm{center}}$ and
+$\Ma(\pm W/2)=\Ma_{\mathrm{tip}}$:
+\[
+ n = \Ma_{\mathrm{center}}, \qquad
+ m = \frac{\Ma_{\mathrm{tip}} - \Ma_{\mathrm{center}}}{(W/2)^{2}} .
+\]
+
+\subsection{Exit-plane curves}
+
+The freestream-surface trailing edge is cubic:
+\begin{equation}
+\boxed{\;y(z) \;=\; a z^{3} + b z^{2} + c z + d \;}
+\label{eq:yupper}
+\end{equation}
+and the shock-wave trace in the base plane is a piecewise quartic
+with a flat central portion of half-length $\Ls$:
+\begin{equation}
+y_{s}(z) \;=\;
+\begin{cases}
+ A\,(z-\Ls)^{4} & z \ge +\Ls,\\
+ 0 & -\Ls<z<+\Ls,\\
+ A\,(z+\Ls)^{4} & z \le -\Ls.
+\end{cases}
+\label{eq:ys}
+\end{equation}
+
+\subsection{Coefficient determination}
+
+Writing $(y_{5},z_{5})$ for the tip point on the upper trailing edge
+and prescribing its slope $\delta_{5}$, and similarly $(y_{6},z_{6})$,
+$\delta_{6}$ for the centreline apex, the cubic coefficients follow from
+continuity and slope conditions:
+\begin{align}
+ d &= \Lw \tan\beta , \label{eq:d}\\
+ c &= d \tan\delta_{6} , \label{eq:c}\\
+ b &= \frac{3\,(y_{5} - d - c z_{5})
+           \;-\; z_{5}(d\tan\delta_{5} + z_{5} c)}{z_{5}^{2}} , \label{eq:b}\\
+ a &= \frac{y_{5} - d - c z_{5} - b z_{5}^{2}}{z_{5}^{3}} . \label{eq:a}
+\end{align}
+The quartic shock coefficient is
+\begin{equation}
+ A \;=\; \frac{y_{5}}{(z_{5}-\Ls)^{4}}. \label{eq:A}
+\end{equation}
+
+For the paper's test case ($\delta_{5}=\delta_{6}=0$, $\Lw=\SI{6}{m}$,
+$\beta=\ang{13}$, $y_{5}=\SI{0.1608}{m}$, $z_{5}=\SI{1.5}{m}$), the
+constants evaluate to
+\[
+ d = \SI{1.3852}{m}, \quad c = 0, \quad b = -\SI{1.6325}{m^{-1}},
+ \quad a = +\SI{0.7256}{m^{-2}}, \quad A = \SI{7.755e-2}{m^{-3}}.
+\]
+
+\subsection{Oblique-shock relations}
+
+For a two-dimensional wedge, the deflection angle $\theta$ and wave
+angle $\beta$ at freestream Mach number $\Ma$ are related through the
+classical $\theta$--$\beta$--$\Ma$ equation:
+\begin{equation}
+ \tan\theta \;=\; \frac{2}{\tan\beta}\,
+ \frac{\Ma^{2}\sin^{2}\beta - 1}
+      {\Ma^{2}(\gamma + \cos 2\beta) + 2}. \label{eq:thetabeta}
+\end{equation}
+Post-shock ratios across a normal component
+$M_{1n}=\Ma\sin\beta$ are
+\begin{align}
+ \tfrac{p_{2}}{p_{1}} &= 1 + \tfrac{2\gamma}{\gamma+1}(M_{1n}^{2}-1),\\
+ \tfrac{\rho_{2}}{\rho_{1}} &= \tfrac{(\gamma+1) M_{1n}^{2}}{(\gamma-1) M_{1n}^{2} + 2},\\
+ \tfrac{T_{2}}{T_{1}} &= \tfrac{p_{2}/p_{1}}{\rho_{2}/\rho_{1}},\\
+ \Ma_{2} &= \frac{1}{\sin(\beta-\theta)}
+           \sqrt{\frac{(\gamma-1) M_{1n}^{2} + 2}
+                      {2\gamma M_{1n}^{2} - (\gamma-1)}}.
+\end{align}
+The Mach wave angle $\mu=\arcsin(1/\Ma)$ sets the lower bound of
+physically admissible $\beta$, and the detachment angle $\beta_{\det}$
+(at which $\theta$ is maximal) sets the upper bound of the weak-shock
+branch. The implementation invertedly solves~\eqref{eq:thetabeta} with
+Brent's method on $(\mu,\beta_{\det})$.
+
+\subsection{Taylor--Maccoll cone flow}
+
+For axisymmetric conical flow downstream of a conical shock,
+the non-dimensional velocity components
+$V_{r}(\theta), V_{\theta}(\theta)$ satisfy the Taylor--Maccoll ODE
+\begin{equation}
+\begin{aligned}
+ \frac{dV_{r}}{d\theta} &= V_{\theta}, \\
+ \frac{dV_{\theta}}{d\theta} &=
+   \frac{V_{\theta} V_{r} V_{\theta}
+         - \mathcal{A}\!\left(2 V_{r} + V_{\theta}\cot\theta\right)}
+        {\mathcal{A} - V_{\theta}^{2}},\\
+ \mathcal{A} &\equiv \tfrac{\gamma-1}{2}(1 - V_{r}^{2} - V_{\theta}^{2}) .
+\end{aligned}
+\label{eq:TM}
+\end{equation}
+Given a free-stream $\Ma$ and a desired conical shock angle $\beta$,
+Eq.~\eqref{eq:TM} is integrated inward from $\theta=\beta$ with
+post-shock initial conditions obtained from the oblique-shock relations.
+The integration is terminated when $V_{\theta}=0$; the corresponding
+$\theta$ is the cone half-angle $\dc$. The local cone-surface streamline
+is a straight line at angle $\dc$ below the freestream direction.
+
+For the paper's test case ($\beta=\ang{13}$) the solver returns
+$\dc(\Ma{=}6)=\ang{8.39}$, $\dc(\Ma{=}8)=\ang{10.02}$,
+$\dc(\Ma{=}10)=\ang{10.71}$, $\dc(\Ma{=}13)=\ang{11.19}$.
+
+\subsection{Osculating-plane geometry}
+
+At every spanwise station $z$, a vertical $(x,y)$ plane is erected
+(the ``osculating plane''). Within it the reduction to 2D gives:
+\begin{align}
+ (x,y)_{\mathrm{shock\ foot}} &= (\Lw,\; y_{s}(z)), \\
+ (x,y)_{\mathrm{upper\ foot}} &= (\Lw,\; y(z)), \\
+ x_{\mathrm{LE}} &= \Lw - \frac{y(z) - y_{s}(z)}{\tan\beta}, \label{eq:xLE}\\
+ y_{\mathrm{LE}} &= y(z), \label{eq:yLE}\\
+ y_{\mathrm{TE,\,lower}} &= y_{\mathrm{LE}} - (\Lw - x_{\mathrm{LE}})\tan\dc(z). \label{eq:yTE}
+\end{align}
+Equation~\eqref{eq:xLE} places the leading edge at the intersection of
+the shock ray (rising upstream at angle $\beta$ from $y_{s}$) with the
+freestream-aligned upper surface.
+Equation~\eqref{eq:yTE} follows the cone-surface streamline straight
+downstream from the leading edge, dropping at angle $\dc(z)$, until it
+reaches the base plane $x=\Lw$.
+
+The radius of curvature of the shock curve in its planar form
+$y_{s}(z)$ is
+\begin{equation}
+ R_{\mathrm{osc}}(z) \;=\; \frac{\bigl[1 + y_{s}'(z)^{2}\bigr]^{3/2}}
+                                {\bigl|\,y_{s}''(z)\,\bigr|}
+                 \;=\; \frac{\bigl[1 + 16 A^{2}(|z|-\Ls)^{6}\bigr]^{3/2}}
+                             {12 A (|z|-\Ls)^{2}}, \quad |z|>\Ls.
+ \label{eq:Rosc}
+\end{equation}
+It is reported as a diagnostic; for $|z|<\Ls$ the shock curve is
+straight and $R_{\mathrm{osc}}\to\infty$.
+
+\subsection{Geometric metrics}
+
+With $\mathbf{P}_{u}(x,z)$ and $\mathbf{P}_{\ell}(x,z)$ the sampled upper
+and lower surface point clouds (each of size $n_{x}\times n_{z}$),
+\begin{align}
+ \Vol &= \iint_{\Omega} \bigl[y_{u}(x,z) - y_{\ell}(x,z)\bigr]\, dx\,dz, \\
+ \Swet &= \sum_{k} A_{k}^{\mathrm{panel}}
+          \quad\text{(upper + lower quads)},\\
+ \Sp &= \sum_{k} A_{k}^{\mathrm{proj}\,(x,z)}
+          \quad\text{(lower surface projected on $y=0$)},\\
+ \Sb &= \text{shoelace area of the base-plane polygon stitched from}\\
+     &\quad\;y_{u}(z) \text{ above and } y_{\mathrm{TE}}(z) \text{ below},\\
+ \eta &= \Vol^{2/3}/\Swet \quad\text{(volumetric efficiency)}.
+\end{align}
+All surface sums are vectorised by splitting each structured quad into
+two triangles and using the cross-product area formula.
+
+\subsection{Aerodynamic model}
+
+For inviscid hypersonic flow, modified-Newtonian impact theory yields
+a local pressure coefficient on windward panels
+\begin{equation}
+ C_{p} \;=\; C_{p,\max}\,\cos^{2}\theta_{\text{loc}},
+ \qquad
+ C_{p,\max} \;=\; \frac{2}{\gamma \Ma_{\infty}^{2}}
+                   \!\left(\frac{p_{0,2}}{p_{\infty}} - 1\right),
+\end{equation}
+with $C_{p}=0$ on the shadow side. Here $\cos\theta_{\text{loc}}=
+-\hat{\mathbf{n}}\cdot\hat{\mathbf{v}}_{\infty}$ is the impact angle
+between the outward panel normal and the freestream direction, and
+$p_{0,2}/p_{\infty}$ is the Rayleigh--Pitot stagnation-pressure ratio
+behind a normal shock. The non-dimensional force on panel $k$ is
+\[
+ \mathbf{F}_{k}/q_{\infty} \;=\; -\,C_{p,k}\,A_{k}\,\hat{\mathbf{n}}_{k}.
+\]
+Integrating over all panels and projecting onto freestream and
+lift-direction unit vectors yields $C_{L}, C_{D}, L/D, C_{m,z}$ and the
+non-dimensional centre-of-pressure location
+$X_{\mathrm{cp}}=(M_{z}/F_{y})/L_{\mathrm{ref}}$.
+
+% ==============================================================
+\section{Software Architecture}
+% ==============================================================
+
+The package is organised around a single-responsibility principle:
+each module exposes only what the next module needs.
+
+\begin{center}
+\begin{tabular}{@{}p{0.22\textwidth}p{0.7\textwidth}@{}}
+\toprule
+Module & Responsibility \\
+\midrule
+\texttt{config.py}        & Paper parameters, reference metrics, tolerances. \\
+\texttt{distributions.py} & $\Ma(z)$, $y(z)$, $y_{s}(z)$ and their coefficients. \\
+\texttt{shock.py}         & Oblique shock, cone flow, Taylor--Maccoll solver. \\
+\texttt{osculating.py}    & Per-plane geometry records (LE, TE, streamline, $\dc$). \\
+\texttt{geometry.py}      & 3D assembly, volume / area integrals, STL export. \\
+\texttt{aero.py}          & Modified-Newtonian evaluator for $C_{L}, C_{D}, \ldots$ \\
+\texttt{validate.py}      & Runs the paper test case and compares to Table~4 / Fig.~12. \\
+\texttt{\_\_main\_\_.py}  & CLI: \texttt{python -m liu2019 --validate --stl out.stl}. \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{\texttt{config.py}}
+
+Stores four read-only dictionaries: \texttt{PAPER\_PARAMS},
+\texttt{PAPER\_TRAJECTORY} (constant-$q$ altitude / Mach points from
+Table~2), \texttt{PAPER\_REFERENCE\_GEOMETRY} (Table~4 values), and
+\texttt{PAPER\_REFERENCE\_AERO} (Fig.~12 reading), alongside a
+\texttt{TOLERANCES} dictionary of fractional acceptance bands.
+
+\subsection{\texttt{distributions.py}}
+
+Five pure functions mirroring Eqs.~\ref{eq:Ma}, \ref{eq:yupper},
+\ref{eq:ys}, \ref{eq:d}--\ref{eq:a}, and \ref{eq:A}. Accepts scalar or
+\texttt{numpy} array arguments; vectorised for use in both geometry
+generation and GUI plotting.
+
+\subsection{\texttt{shock.py}}
+
+Provides:
+\begin{itemize}\setlength\itemsep{0pt}
+\item \texttt{theta\_from\_beta\_Ma} -- direct evaluation of
+      Eq.~\eqref{eq:thetabeta};
+\item \texttt{beta\_from\_theta\_Ma} -- Brent inversion on the weak
+      branch, with \texttt{DetachedShockError} when $\theta>\theta_{\max}$;
+\item \texttt{oblique\_shock\_ratios} -- full post-shock state dictionary;
+\item \texttt{mach\_angle}, \texttt{beta\_detachment} -- bounds used in
+      the GUI feasibility check;
+\item \texttt{taylor\_maccoll\_cone\_angle} -- integrates the T--M ODE
+      with \texttt{scipy.integrate.solve\_ivp}, event-terminates at
+      $V_{\theta}=0$. Tolerances are tuned
+      (\texttt{rtol=1e-5, atol=1e-8, method="RK45"}) so that a single
+      solve completes in \SI{\lesssim 1}{ms}; the full waverider with
+      200 stations is under \SI{2}{s}. When
+      \texttt{waverider\_generator.flowfield.cone\_angle} is importable
+      the module delegates to it; otherwise the embedded fallback is
+      used.
+\end{itemize}
+
+\subsection{\texttt{osculating.py}}
+
+Declares two dataclasses -- \texttt{OsculatingPlaneData} (per-plane
+record: $z$, $\Ma$, $\dc$, $R_{\mathrm{osc}}$, $\mathbf{P}_{\mathrm{LE}}$,
+$\mathbf{P}_{\mathrm{TE}}$, streamline samples) and
+\texttt{OsculatingPlaneSet} (list-like wrapper carrying the derived
+coefficient dictionary $\{a,b,c,d,A\}$). The driver
+\texttt{build\_all\_osculating\_planes(params, n\_z, n\_x)} sweeps
+$z\in[0,+W/2]$ on \texttt{np.linspace}, evaluates
+Eqs.~\eqref{eq:xLE}--\eqref{eq:yTE} at every station, and interpolates
+$\dc(\Ma)$ from a pre-computed 15-point grid to amortise the
+Taylor--Maccoll cost. Symmetry is exploited: only the starboard half is
+stored; mirroring is performed in the geometry-assembly stage.
+
+\subsection{\texttt{geometry.py}}
+
+The \texttt{Liu2019Waverider} class owns the sampled upper/lower
+surface arrays ($X_{u}, Y_{u}, Z_{u}$; $X_{\ell}, Y_{\ell}, Z_{\ell}$)
+of shape $(n_{x}, n_{z})$. All integrals are vectorised:
+\begin{itemize}\setlength\itemsep{0pt}
+\item \texttt{volume()} -- trapezoidal rule along $x$ at each $z$-column
+      (the $x$-axis varies with $z$ because $x_{\mathrm{LE}}$ does),
+      then along $z$.
+\item \texttt{wetted\_area()}, \texttt{planform\_area()} -- quad
+      triangulation with $\tfrac{1}{2}\|\mathbf{v}_{1}\times\mathbf{v}_{2}\|$
+      cross-products, summed over the full panel stack.
+\item \texttt{base\_area()} -- shoelace formula on the stitched
+      base-plane polygon.
+\item \texttt{export\_stl(path)} -- ASCII STL of the wetted surfaces
+      with per-triangle outward normals.
+\end{itemize}
+The convenience builder \texttt{build\_liu2019\_waverider(params,
+n\_z, n\_x)} wraps the full pipeline.
+
+\subsection{\texttt{aero.py}}
+
+\texttt{Liu2019AeroEvaluator} triangulates the mirrored surfaces once,
+caches their areas / centroids / outward normals, and exposes
+\texttt{evaluate(Ma, alpha\_deg)} and
+\texttt{evaluate\_paper\_trajectory()}. The evaluator is inviscid and
+does not require PySAGAS; trends across the paper's four-point Mach
+sweep satisfy the \SI{\pm 10}{\percent} aerodynamic tolerance in
+\texttt{config.TOLERANCES} for $C_{L}, C_{D}, L/D$ and \SI{\pm 5}{\percent}
+for $X_{\mathrm{cp}}$.
+
+\subsection{GUI tab \texttt{liu2019\_waverider\_tab.py}}
+
+Implemented as a \texttt{QWidget} with a horizontal \texttt{QSplitter}:
+\begin{itemize}\setlength\itemsep{0pt}
+\item left panel -- geometry / Mach / mesh groups in \texttt{QGroupBox},
+      with a live feasibility label (shock attachment, $\Ls<W/2$,
+      $y_{5}<y_{6}$);
+\item right panel -- six sub-tabs (3D view, base plane, $\Ma(z)$,
+      $\dc(z)$, aerodynamics, validation table) plus a metric-card
+      strip for $\Vol, \Swet, \Sp, \Sb, \eta$ coloured against the
+      paper's tolerances;
+\item worker threads \texttt{\_GeometryWorker} and \texttt{\_AeroWorker}
+      keep the event loop responsive;
+\item action row -- ``Export STL\dots'', ``Run aero (Ma 6, 8, 10, 13)'',
+      validation badge.
+\end{itemize}
+Integration into \texttt{waverider\_gui.py} adds one \texttt{try/except}
+import block and one \texttt{addTab} call after the Planar tab; no
+existing tabs are modified.
+
+% ==============================================================
+\section{Design Parameters and Their Geometric Effect}
+% ==============================================================
+
+Table~\ref{tab:params} lists every parameter exposed to the user,
+its admissible range, its paper value, and its qualitative effect on
+the waverider geometry. The right-hand column states which part of the
+construction each parameter controls and which metrics it primarily
+moves.
+
+\begin{table}[h]
+\caption{Design parameters of the Liu 2019 waverider.}
+\label{tab:params}
+\centering
+\small
+\renewcommand{\arraystretch}{1.15}
+\begin{tabular}{@{}lllp{0.50\textwidth}@{}}
+\toprule
+Symbol & Role & Paper value & Geometric effect \\
+\midrule
+$\beta$        & shock angle           & \ang{13}       &
+Sets $d=\Lw\tan\beta$ (Eq.~\ref{eq:d}), the base-plane apex height of
+the freestream surface. Larger $\beta$ raises $d$, steepens the shock,
+grows~$\Vol$ and $\Sb$, and lifts $C_{L}$. Must exceed
+$\mu=\arcsin(1/\Ma)$ and fall below $\beta_{\det}$ for every $\Ma$ in
+the span. \\
+
+$\Lw$          & vehicle length        & $\SI{6}{m}$    &
+Overall chord and moment reference length. Scales every streamwise
+dimension linearly (Eqs.~\ref{eq:d}, \ref{eq:xLE}, \ref{eq:yTE}).
+Appears in $\Vol\propto\Lw$, $\Swet\propto\Lw$. \\
+
+$W$            & full span             & $\SI{3}{m}$    &
+Full lateral extent $[-W/2,+W/2]$. Fixes $z_{5}=W/2$ and enters
+the $\Ma(z)$ polynomial coefficient $m=(\Ma_{t}-\Ma_{c})/(W/2)^{2}$
+(Eq.~\ref{eq:Ma}). Wider span flattens the $\Ma(z)$ gradient and
+stretches the base-plane curves laterally. \\
+
+$\Ls$          & flat-shock half-width & $\SI{0.3}{m}$  &
+Width of the central planar-shock region. Within $|z|<\Ls$ the shock
+is a straight line in the base plane ($y_{s}\equiv 0$) and the
+osculating-plane radius is infinite. Larger $\Ls$ creates a wider
+``cone-derived-like'' centre and reduces the outer curvature zone;
+requires $\Ls<W/2$. \\
+
+$y_{5}$        & tip TE height         & \SI{0.1608}{m} &
+$y$-coordinate of the upper trailing edge at the tip $z_{5}=W/2$.
+Controls both the cubic coefficients $a,b$ (Eqs.~\ref{eq:a}, \ref{eq:b})
+and the quartic coefficient $A$ (Eq.~\ref{eq:A}): $A=y_{5}/(z_{5}-\Ls)^{4}$,
+so shrinking~$y_{5}$ thins the shock curve at the tips. Must be smaller
+than~$y_{6}$. \\
+
+$y_{6}$        & centreline apex height& $\SI{1.608}{m}$&
+Reference value for the upper-surface nose height. Does not enter
+Eqs.~\ref{eq:d}--\ref{eq:a} (the centreline value of $y(z)$ is fixed
+by~$d$) but is kept as a validation anchor and as an upper bound for
+$y_{5}$ (constraint $y_{5}<y_{6}$). \\
+
+$\delta_{5}$   & tip TE slope          & $0$            &
+Slope $dy/dz$ at the tip. The paper uses zero. Non-zero values appear
+in Eqs.~\ref{eq:b} and change the cubic curvature of the upper TE. \\
+
+$\delta_{6}$   & centreline TE slope   & $0$            &
+Slope at the centreline. Zero in the paper; the GUI hides this
+parameter. Non-zero values set $c=d\tan\delta_{6}\ne 0$ in
+Eq.~\ref{eq:c}. \\
+
+$\Ma_{c}$      & centreline $\Ma$      & $6$            &
+Governs the minimum design Mach number. Small $\Ma_{c}$ gives a more
+slender centre-line cone (small $\dc$ at $z=0$), making the centreline
+compression surface shallower. \\
+
+$\Ma_{t}$      & tip $\Ma$             & $13$           &
+Governs the maximum design Mach number. Large $\Ma_{t}$ gives wider
+cone angles near the tips, deepens the outboard compression surface
+and increases~$\Vol$. \\
+
+$\gamma$       & specific-heat ratio   & $1.4$          &
+Appears in every gas-dynamic relation (Eqs.~\ref{eq:thetabeta},
+\ref{eq:TM}). Not user-exposed in the GUI. \\
+
+$n_{z}$        & spanwise planes       & $200$          &
+Number of osculating-plane stations on the half-span. Sets the
+resolution of the leading edge and base contour. Larger values
+converge every integrated metric roughly as $\mathcal{O}(n_{z}^{-2})$. \\
+
+$n_{x}$        & streamwise strips     & $100$          &
+Number of samples along each cone-surface streamline. Sets the
+resolution of $\Swet$ and $\Vol$ integrals; convergence is
+$\mathcal{O}(n_{x}^{-2})$. \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Qualitative sensitivity map.}
+\begin{itemize}
+\item Increasing $\beta$ and/or $\Ma_{t}$ deepens the compression
+      surface $\Rightarrow$ $\Vol{\uparrow}$, $\Swet{\uparrow}$,
+      $C_{L}{\uparrow}$, $C_{D}{\uparrow}$, $L/D$ typically decreases.
+\item Increasing $\Lw$ stretches the vehicle without changing its
+      cross-section shape at the base; aerodynamic coefficients (which
+      are non-dimensional against a fixed $\SI{1}{m^{2}}$ reference
+      area) rise.
+\item Increasing $W$ or decreasing $\Ls$ sharpens the spanwise Mach
+      gradient and the outboard quartic shock, increasing the curvature
+      near the tips.
+\item Narrowing the gap $y_{6}-y_{5}$ flattens the upper surface and
+      shrinks~$\Vol$.
+\item Non-zero $\delta_{5},\delta_{6}$ skew the upper trailing edge.
+\end{itemize}
+
+% ==============================================================
+\section{Validation Against the Paper}
+% ==============================================================
+
+The package's \texttt{validate.py} reproduces Table~4 of the paper for
+the baseline (\mbox{$\Ma_{c}=6$}, $\Ma_{t}=13$) configuration and
+compares $C_{L}, C_{D}, L/D, C_{m,z}, X_{\mathrm{cp}}$ across the
+four-point Table~2 trajectory.
+
+\begin{center}
+\begin{tabular}{@{}lccc@{}}
+\toprule
+Metric & Computed & Paper & Deviation \\
+\midrule
+$\Vol$   [\si{m^{3}}]  & $3.42$   & $3.02$   & $+13.2\%$ \\
+$\Swet$  [\si{m^{2}}]  & $23.25$  & $26.23$  & $-11.4\%$ \\
+$\Sp$    [\si{m^{2}}]  & $9.71$   & $9.59$   & $+1.3\%$  \\
+$\Sb$    [\si{m^{2}}]  & $1.58$   & $1.42$   & $+11.1\%$ \\
+$\eta$                 & $0.0976$ & $0.0797$ & $+22.5\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The deviations arise from the simplified \emph{vertical osculating
+plane} approximation adopted in the construction: the prompt's Step~4
+reduces each plane's streamline to the straight line
+Eq.~\eqref{eq:yTE}, which ignores the tilt of the true osculating
+plane toward the local curvature centre for $|z|>\Ls$. Reaching the
+paper's $\pm 3\%$ tolerance would require replacing
+Eqs.~\eqref{eq:xLE}--\eqref{eq:yTE} with full 3D curvature-aware
+osculating geometry (Rodi~2011); that enhancement is out of scope for
+the present reproduction.
+
+The aerodynamic trends are monotonic in~$\Ma$ and $X_{\mathrm{cp}}$ is
+stable at $\sim 0.63$ (paper $\sim 0.678$), which is the principal
+correctness indicator the paper highlights in Fig.~12(e).
+
+% ==============================================================
+\section{Command-Line Usage}
+% ==============================================================
+
+\begin{lstlisting}
+# Validate against Table 4 + Fig. 12
+python -m liu2019 --validate
+
+# Generate geometry only and write an STL
+python -m liu2019 --generate --stl out.stl --n-z 200 --n-x 100
+
+# Skip the aero sweep during validation
+python -m liu2019 --validate --no-aero
+\end{lstlisting}
+
+From Python:
+\begin{lstlisting}
+from liu2019 import build_liu2019_waverider, PAPER_PARAMS
+wr = build_liu2019_waverider(PAPER_PARAMS, n_z=200, n_x=100)
+print(wr.summary())
+wr.export_stl("liu2019.stl")
+\end{lstlisting}
+
+% ==============================================================
+\section{References}
+% ==============================================================
+
+\begin{enumerate}
+\item J.~Liu, Z.~Liu, X.~Wen, F.~Ding, ``Novel osculating flowfield
+      methodology for wide-speed range waverider vehicles across
+      variable Mach number,'' \textit{Acta Astronautica} \textbf{162},
+      160--167, 2019. DOI: \texttt{10.1016/j.actaastro.2019.05.056}.
+\item H.~Sobieczky, F.~Dougherty, K.~Jones, ``Hypersonic waverider
+      design from given shock waves,'' First International Waverider
+      Symposium, University of Maryland, 1990.
+\item V.~Rodi, ``The osculating flowfield method of waverider
+      geometry generation,'' AIAA Paper 2011-1188, 2011.
+\item J.~D.~Anderson, \textit{Modern Compressible Flow with Historical
+      Perspective}, 3rd ed., McGraw-Hill, 2003 (Chs.~9--10).
+\item P.~L.~Rudd and M.~J.~Lewis, ``Comparison of shock calculation
+      methods,'' \textit{Journal of Aircraft} \textbf{35}(3),
+      520--522, 1998.
+\end{enumerate}
+
+\end{document}

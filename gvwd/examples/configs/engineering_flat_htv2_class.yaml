@@ -1,0 +1,27 @@
+# HTV-2-class flat-bottom engineering glide vehicle (GVWD spec §5.6)
+# Used by examples/01_htv2_class_flat_bottom.py.
+geometry:
+  mode: engineering_flat
+  M_design: 15.0
+  theta_fore_deg: 8.0
+  Lambda_deg: 75.0
+  L_fore: 2.5
+  L_center: 1.5
+  b_base: 0.5
+  h_base: 0.4
+  h_fore_nose: 0.0
+  r_LE_mm: 5.0
+  r_nose_mm: 10.0
+  theta_upper_deg: 0.0
+  gamma: 1.4
+fins:
+  n_fins: 0
+sweep:
+  enabled: true
+  M_grid: [5.0, 20.0, 8]
+  alpha_grid_deg: [0.0, 15.0, 6]
+  altitude_km: 30.0
+  T_w: 1500.0
+  Re_x_tr: 1.0e+6
+output_dir: results
+tag: htv2_class

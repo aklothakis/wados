@@ -1,0 +1,30 @@
+# PSWR-1 production config: M=6, h=30 km, X-band radar (spec §6.5)
+# NOTE: at M=6 with gamma=1.4 perfect-gas, post-shock T < 1800 K and there
+# is no thermal ionization -> sigma_b objective collapses to its floor.
+# This config preserves spec compliance; for a plasma-relevant trade-off
+# use m15_h30km_xband.yaml.
+M_inf: 6.0
+body_length: 10.0
+T_w: 1500.0
+p_inf: 1197.03    # US Std 30 km
+T_inf: 226.65
+f0_Hz: 10.0e9     # X-band
+R_LE: 1.0e-3
+q_LE_max: 1.0e13  # see PSWRConfig docstring re: 50 MW/m^2 gate
+bistatic_angles_deg:
+  - [0.0, 0.0]
+  - [90.0, 0.0]
+  - [180.0, 0.0]
+k_i_hat: [-1.0, 0.0, 0.0]
+n_span_geom: 41
+n_chord_geom: 20
+n_span_grid: 21
+n_chord_grid: 30
+n_normal: 10
+beta_lo_deg: 8.0
+beta_hi_deg: 35.0
+lambda_lo_deg: 55.0
+lambda_hi_deg: 80.0
+margin_detach_deg: 1.0
+margin_mach_deg: 1.0
+gamma: 1.4

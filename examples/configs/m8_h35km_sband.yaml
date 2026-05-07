@@ -1,0 +1,27 @@
+# PSWR-1 production config: M=8, h=35 km, S-band radar (spec §6.5)
+# NOTE: at M=8 perfect-gas T_post still < 2500K; expect weak/no plasma.
+M_inf: 8.0
+body_length: 10.0
+T_w: 1500.0
+p_inf: 559.07     # US Std 35 km
+T_inf: 236.51
+f0_Hz: 3.0e9      # S-band
+R_LE: 1.0e-3
+q_LE_max: 1.0e13
+bistatic_angles_deg:
+  - [0.0, 0.0]
+  - [90.0, 0.0]
+  - [180.0, 0.0]
+k_i_hat: [-1.0, 0.0, 0.0]
+n_span_geom: 41
+n_chord_geom: 20
+n_span_grid: 21
+n_chord_grid: 30
+n_normal: 10
+beta_lo_deg: 8.0
+beta_hi_deg: 35.0
+lambda_lo_deg: 55.0
+lambda_hi_deg: 80.0
+margin_detach_deg: 1.0
+margin_mach_deg: 1.0
+gamma: 1.4

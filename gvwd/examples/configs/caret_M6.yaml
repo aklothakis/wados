@@ -1,0 +1,12 @@
+# Nonweiler caret reference (GVWD spec §5.6)
+geometry:
+  mode: caret
+  M_design: 6.0
+  theta_d_deg: 14.0
+  Lambda_deg: 70.0
+  L: 10.0
+  gamma: 1.4
+sweep:
+  enabled: false
+output_dir: results
+tag: caret_M6

@@ -1,0 +1,37 @@
+# Fattah-2-class flat-bottom with 4 fins (GVWD spec §5.6)
+# Smaller than HTV-2 (L_total = 1.8 m), 4 fins at 45 deg dihedral.
+geometry:
+  mode: engineering_flat
+  M_design: 13.0
+  theta_fore_deg: 8.0
+  Lambda_deg: 75.0
+  L_fore: 1.2
+  L_center: 0.6
+  b_base: 0.25
+  h_base: 0.20
+  h_fore_nose: 0.0
+  r_LE_mm: 3.0
+  r_nose_mm: 6.0
+  theta_upper_deg: 0.0
+  gamma: 1.4
+fins:
+  n_fins: 4
+  root_chord: 0.20
+  tip_chord: 0.07
+  span: 0.25
+  sweep_LE_deg: 45.0
+  dihedral_deg: 45.0
+  t_c: 0.05
+  max_thickness_loc: 0.5
+  LE_style: blunt_cylinder
+  LE_radius_mm: 1.0
+  attach_x_frac: 0.5
+sweep:
+  enabled: true
+  M_grid: [5.0, 14.0, 6]
+  alpha_grid_deg: [0.0, 12.0, 5]
+  altitude_km: 25.0
+  T_w: 1500.0
+  Re_x_tr: 1.0e+6
+output_dir: results
+tag: fattah2_class

@@ -1,0 +1,12 @@
+# Flat-bottomed delta reference (GVWD spec §5.6)
+geometry:
+  mode: flat_delta
+  M_design: 5.0
+  theta_d_deg: 12.0
+  Lambda_deg: 75.0
+  L: 8.0
+  gamma: 1.4
+sweep:
+  enabled: false
+output_dir: results
+tag: flat_delta_M5

@@ -1,0 +1,41 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Headless-CI subset: skip GUI / CAD packages that the
+          # library test suites do not import (PyQt5, cadquery).
+          pip install numpy scipy pandas matplotlib scikit-learn pytest
+          # Vendored aero solver dependencies
+          pip install numpy-stl trimesh
+
+      - name: Run GVWD test suite
+        run: pytest gvwd/tests/ -q
+
+      - name: Run PySAGAS test suite
+        run: pytest pysagas/tests/ -q

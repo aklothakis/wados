@@ -1,0 +1,30 @@
+# PSWR-1 plasma-relevant config: M=15, h=30 km, X-band radar.
+# This is the case where the central hypothesis (variable-wedge beta(y)
+# shapes the plasma sheath to suppress RCS) is testable. Perfect-gas
+# Rankine-Hugoniot at M=15 gives T_post ~ 4900 K, well into the Saha-LTE
+# ionization regime.
+M_inf: 15.0
+body_length: 10.0
+T_w: 1500.0
+p_inf: 1197.03    # US Std 30 km
+T_inf: 226.65
+f0_Hz: 10.0e9     # X-band
+R_LE: 1.0e-3
+q_LE_max: 1.0e13
+bistatic_angles_deg:
+  - [0.0, 0.0]
+  - [90.0, 0.0]
+  - [180.0, 0.0]
+k_i_hat: [-1.0, 0.0, 0.0]
+n_span_geom: 41
+n_chord_geom: 20
+n_span_grid: 21
+n_chord_grid: 30
+n_normal: 10
+beta_lo_deg: 8.0
+beta_hi_deg: 35.0
+lambda_lo_deg: 55.0
+lambda_hi_deg: 80.0
+margin_detach_deg: 1.0
+margin_mach_deg: 1.0
+gamma: 1.4

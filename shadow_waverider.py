@@ -1,0 +1,1304 @@
+"""
+Cone-Derived Waverider Generator
+================================
+Based on Adam Weaver's SHADOW (Stability of Hypersonic Aerodynamic Derivatives of Waveriders)
+methodology from his Master's thesis at Utah State University.
+
+This implementation creates waveriders by:
+1. Defining a polynomial leading edge curve
+2. Projecting it onto a conical shock surface
+3. Tracing streamlines through Taylor-Maccoll flow field
+4. Creating a freestream upper surface
+
+Author: Adapted for integration with existing waverider_generator package
+"""
+
+import numpy as np
+import math
+from scipy.integrate import solve_ivp
+from scipy.interpolate import UnivariateSpline, interp1d, CubicSpline
+from typing import Tuple, List, Optional, Union
+import warnings
+
+
+class ShadowWaverider:
+    """
+    Cone-derived waverider using polynomial leading edge parameterization.
+    
+    This class generates waverider geometries by:
+    1. Defining a leading edge via polynomial coefficients
+    2. Projecting the leading edge onto a conical shock
+    3. Tracing streamlines through the Taylor-Maccoll flow field
+    4. Creating a freestream (flat) upper surface
+    
+    Parameters
+    ----------
+    mach : float
+        Freestream Mach number
+    shock_angle : float
+        Shock cone angle in degrees
+    poly_coeffs : list
+        Polynomial coefficients [A_n, A_{n-1}, ..., A_1, A_0] where
+        y = A_n*x^n + A_{n-1}*x^{n-1} + ... + A_1*x + A_0
+        Note: A_1 (linear term) should be 0 for smooth y-axis reflection
+    n_leading_edge : int
+        Number of points along the leading edge
+    n_streamwise : int
+        Number of points along each streamline
+    gamma : float, optional
+        Ratio of specific heats (default 1.4)
+    length : float, optional
+        Non-dimensional length of waverider (default 1.0)
+    """
+    
+    def __init__(
+        self,
+        mach: float,
+        shock_angle: float,
+        poly_coeffs: List[float],
+        n_leading_edge: int = 21,
+        n_streamwise: int = 20,
+        gamma: float = 1.4,
+        length: float = 1.0,
+        top_surface_control: float = 0.0,
+        upper_surface_spline: Optional[list] = None,
+        volume_loft_spline: Optional[list] = None,
+        volume_loft_growth: str = 'linear'
+    ):
+        # Validate inputs
+        if mach <= 1.0:
+            raise ValueError("Mach number must be greater than 1.0")
+
+        # Check shock angle is valid (must be greater than Mach angle)
+        mach_angle = np.degrees(np.arcsin(1.0 / mach))
+        if shock_angle <= mach_angle:
+            raise ValueError(f"Shock angle ({shock_angle}°) must be greater than Mach angle ({mach_angle:.2f}°)")
+
+        self.mach = float(mach)
+        self.shock_angle = float(shock_angle)
+        self.shock_angle_rad = np.radians(shock_angle)
+        self.gamma = float(gamma)
+        self.length = float(length)
+        self.top_surface_control = float(top_surface_control)
+
+        # Upper surface dome (spline control points)
+        self.upper_surface_spline = upper_surface_spline  # list of (span_frac, height) or None
+
+        # Volume loft (spline control points for back-face profile)
+        self.volume_loft_spline = volume_loft_spline  # list of (span_frac, height_offset) or None
+        self.volume_loft_growth = volume_loft_growth   # 'linear' or 'smooth'
+
+        # Process polynomial coefficients
+        self.poly_coeffs = list(poly_coeffs)
+        self.poly_order = len(self.poly_coeffs) - 1
+        
+        # Mesh resolution
+        self.n_leading_edge = n_leading_edge
+        self.n_streamwise = n_streamwise
+        
+        # Ensure odd number of leading edge points for symmetry
+        if self.n_leading_edge % 2 == 0:
+            self.n_leading_edge += 1
+        
+        # Initialize storage
+        self.leading_edge = None
+        self.lower_surface = None
+        self.upper_surface = None
+        self.base_surface = None
+        
+        # Flow field data
+        self.vel_field = None
+        self.cone_angle = None
+        self.deflection_angle = None
+        self.post_shock_mach = None
+        
+        # Geometry metrics
+        self.planform_area = None
+        self.volume = None
+        self.mac = None  # Mean aerodynamic chord
+        self.cg = None  # Center of gravity estimate
+        
+        # Build the waverider
+        self._compute_shock_relations()
+        self._solve_taylor_maccoll()
+        self._generate_leading_edge()
+        self._trace_lower_surface()
+        self._generate_upper_surface()
+        self._transform_coordinates()  # Transform to standard coordinate system
+        self._compute_geometry_metrics()
+    
+    def _transform_coordinates(self):
+        """
+        Transform from internal coordinates to standard waverider coordinates.
+        
+        Internal: X=span, Y=vertical, Z=streamwise
+        Standard: X=streamwise, Y=vertical, Z=span
+        
+        This matches the coordinate system used in cad_export.py:
+        x --> streamwise direction
+        y --> transverse direction (vertical)
+        z --> spanwise direction
+        """
+        def transform(points):
+            """Transform points array: [x,y,z] -> [z,y,x]"""
+            if points is None:
+                return None
+            transformed = points.copy()
+            # Swap X and Z
+            old_x = transformed[..., 0].copy()
+            old_z = transformed[..., 2].copy()
+            transformed[..., 0] = old_z  # New X = old Z (streamwise)
+            transformed[..., 2] = old_x  # New Z = old X (span)
+            return transformed
+        
+        self.leading_edge = transform(self.leading_edge)
+        self.lower_surface = transform(self.lower_surface)
+        self.upper_surface = transform(self.upper_surface)
+        
+        # Also swap z_start/z_end to x_start/x_end conceptually
+        # These become the streamwise extent
+        self.x_start = self.z_start
+        self.x_end = self.z_end
+
+    def check_surface_health(self):
+        """
+        Analyse surface thickness distribution and return a health report.
+
+        The report includes where surfaces are thin or were clamped, and
+        suggests polynomial coefficient adjustments to fix the issue.
+
+        Returns
+        -------
+        dict with keys:
+            healthy : bool
+                True if no intersection issues detected.
+            min_thickness_ratio : float
+                Minimum thickness / LE thickness across the grid.
+            thin_pct : float
+                Percentage of grid points with thickness < 5 % of LE thickness.
+            worst_station : int or None
+                Spanwise station index with thinnest trailing-edge region.
+            suggestions : list of str
+                Human-readable suggestions for fixing the geometry.
+        """
+        n_le = self.upper_surface.shape[0]
+        n_stream = self.upper_surface.shape[1]
+
+        min_ratio = float('inf')
+        thin_count = 0
+        total_count = 0
+        worst_station = None
+        worst_ratio = float('inf')
+
+        for i in range(n_le):
+            le_gap = abs(self.upper_surface[i, 0, 1] -
+                         self.lower_surface[i, 0, 1])
+            if le_gap < 1e-10:
+                le_gap = 1e-6  # avoid division by zero at degenerate tips
+
+            for j in range(1, n_stream):
+                y_up = self.upper_surface[i, j, 1]
+                y_lo = self.lower_surface[i, j, 1]
+                gap = y_up - y_lo
+                ratio = gap / le_gap
+                total_count += 1
+
+                if ratio < min_ratio:
+                    min_ratio = ratio
+
+                if ratio < 0.05:
+                    thin_count += 1
+
+            # Check TE specifically (last streamwise point)
+            te_gap = (self.upper_surface[i, -1, 1] -
+                      self.lower_surface[i, -1, 1])
+            te_ratio = te_gap / le_gap
+            if te_ratio < worst_ratio:
+                worst_ratio = te_ratio
+                worst_station = i
+
+        thin_pct = 100.0 * thin_count / max(total_count, 1)
+        healthy = thin_pct < 1.0 and min_ratio > 0.02
+
+        suggestions = []
+        if not healthy:
+            suggestions.append(
+                f"Surfaces are very thin near the trailing edge "
+                f"({thin_pct:.1f}% of points < 5% of LE thickness).")
+            # Build coefficient-specific advice
+            a0 = self.poly_coeffs[-1]
+            a2 = self.poly_coeffs[-3] if len(self.poly_coeffs) >= 3 else 0
+            suggestions.append(
+                f"Current A\u2080={a0:.3f}, A\u2082={a2:.2f}. "
+                f"Try the following adjustments:")
+            suggestions.append(
+                f"  - Make A\u2080 more negative (e.g. {a0 - 0.05:.3f}) "
+                f"\u2192 deeper nose, more thickness")
+            suggestions.append(
+                f"  - Make A\u2082 more negative (e.g. {a2 - 2.0:.2f}) "
+                f"\u2192 more sweep, shorter streamlines")
+            suggestions.append(
+                f"  - Reduce vehicle length (currently {self.length:.2f}m) "
+                f"\u2192 less streamline curvature")
+
+        return {
+            'healthy': healthy,
+            'min_thickness_ratio': min_ratio,
+            'thin_pct': thin_pct,
+            'worst_station': worst_station,
+            'suggestions': suggestions,
+        }
+
+    def _compute_shock_relations(self):
+        """Compute oblique shock relations."""
+        M = self.mach
+        beta = self.shock_angle_rad
+        gamma = self.gamma
+        
+        # Normal Mach number upstream
+        Mn1 = M * np.sin(beta)
+        self.Mn1 = Mn1  # Store for pressure coefficient calculations
+
+        # Check for detached shock
+        if Mn1 < 1.0:
+            raise ValueError("Invalid shock configuration: normal Mach number < 1")
+        
+        # Flow deflection angle (theta-beta-M relation)
+        numerator = 2 * (1/np.tan(beta)) * (M**2 * np.sin(beta)**2 - 1)
+        denominator = M**2 * (gamma + np.cos(2*beta)) + 2
+        self.deflection_angle = np.arctan(numerator / denominator)
+        
+        # Normal Mach number downstream
+        Mn2_sq = (1 + (gamma-1)/2 * Mn1**2) / (gamma * Mn1**2 - (gamma-1)/2)
+        Mn2 = np.sqrt(Mn2_sq)
+        
+        # Post-shock Mach number
+        self.post_shock_mach = Mn2 / np.sin(beta - self.deflection_angle)
+        
+        # Non-dimensional velocity
+        V = 1.0 / np.sqrt(2.0 / ((gamma - 1) * self.post_shock_mach**2) + 1.0)
+        
+        # Velocity components at shock
+        self.Vr_shock = V * np.cos(beta - self.deflection_angle)
+        self.Vtheta_shock = -V * np.sin(beta - self.deflection_angle)
+    
+    def _taylor_maccoll_ode(self, theta, y):
+        """
+        Taylor-Maccoll ODE system.
+        
+        Parameters
+        ----------
+        theta : float
+            Polar angle (from cone axis)
+        y : array
+            [Vr, Vtheta] velocity components
+            
+        Returns
+        -------
+        dydt : array
+            Derivatives [dVr/dtheta, dVtheta/dtheta]
+        """
+        Vr, Vtheta = y
+        gamma = self.gamma
+        
+        # Intermediate constant
+        A = (gamma - 1) / 2 * (1 - Vr**2 - Vtheta**2)
+        
+        dVr_dtheta = Vtheta
+        
+        # Handle singularity at theta = 0
+        if abs(theta) < 1e-10:
+            dVtheta_dtheta = 0
+        else:
+            numerator = Vtheta**2 * Vr - A * (2*Vr + Vtheta / np.tan(theta))
+            denominator = A - Vtheta**2
+            
+            if abs(denominator) < 1e-12:
+                dVtheta_dtheta = 0
+            else:
+                dVtheta_dtheta = numerator / denominator
+        
+        return [dVr_dtheta, dVtheta_dtheta]
+    
+    def _solve_taylor_maccoll(self):
+        """Solve Taylor-Maccoll equations from shock to cone surface."""
+        # Initial conditions at shock
+        y0 = [self.Vr_shock, self.Vtheta_shock]
+        
+        # Event function: stop when Vtheta crosses zero
+        def vtheta_zero(theta, y):
+            return y[1]
+        vtheta_zero.terminal = True
+        vtheta_zero.direction = 1  # Crossing from negative to positive
+        
+        # Integrate from shock angle inward toward cone axis
+        sol = solve_ivp(
+            self._taylor_maccoll_ode,
+            (self.shock_angle_rad, 0.01),  # Don't go all the way to 0 to avoid singularity
+            y0,
+            events=vtheta_zero,
+            dense_output=True,
+            max_step=0.001
+        )
+        
+        if sol.t_events[0].size > 0:
+            self.cone_angle = sol.t_events[0][0]
+        else:
+            # If event not triggered, use last point where Vtheta is small
+            idx = np.argmin(np.abs(sol.y[1]))
+            self.cone_angle = sol.t[idx]
+        
+        # Store velocity field
+        # Create arrays from shock to cone
+        theta_vals = np.linspace(self.shock_angle_rad, self.cone_angle, 500)
+        
+        # Interpolate velocity field
+        Vr_interp = interp1d(sol.t, sol.y[0], kind='linear', fill_value='extrapolate')
+        Vtheta_interp = interp1d(sol.t, sol.y[1], kind='linear', fill_value='extrapolate')
+        
+        self.vel_field = {
+            'theta': theta_vals,
+            'Vr': Vr_interp(theta_vals),
+            'Vtheta': Vtheta_interp(theta_vals),
+            'Vr_interp': Vr_interp,
+            'Vtheta_interp': Vtheta_interp
+        }
+        
+        self.cone_angle_deg = np.degrees(self.cone_angle)
+    
+    def _get_velocity_at_theta(self, theta: float) -> Tuple[float, float]:
+        """
+        Get interpolated velocity components at given theta.
+        
+        Parameters
+        ----------
+        theta : float
+            Polar angle in radians
+            
+        Returns
+        -------
+        Vr, Vtheta : tuple
+            Velocity components
+        """
+        # Clamp theta to valid range
+        theta = np.clip(theta, self.cone_angle, self.shock_angle_rad)
+        
+        Vr = float(self.vel_field['Vr_interp'](theta))
+        Vtheta = float(self.vel_field['Vtheta_interp'](theta))
+        
+        return Vr, Vtheta
+    
+    def _polynomial_leading_edge(self, x: float) -> float:
+        """
+        Evaluate the leading edge polynomial at x.
+        
+        Parameters
+        ----------
+        x : float
+            x-coordinate (spanwise)
+            
+        Returns
+        -------
+        y : float
+            y-coordinate (vertical in local frame)
+        """
+        y = 0
+        for i, coeff in enumerate(self.poly_coeffs):
+            power = self.poly_order - i
+            y += coeff * x**power
+        return y
+    
+    def _project_to_shock_cone(self, x: float, y: float) -> float:
+        """
+        Project (x, y) point onto the shock cone to get z coordinate.
+        
+        Given x, y in the local leading edge plane, find z such that
+        the point lies on the shock cone.
+        
+        Parameters
+        ----------
+        x, y : float
+            Local coordinates
+            
+        Returns
+        -------
+        z : float
+            Streamwise coordinate on shock cone
+        """
+        cos_beta = np.cos(self.shock_angle_rad)
+        sin_beta = np.sin(self.shock_angle_rad)
+        
+        # From spherical coordinate relation:
+        # theta = shock_angle means point is on shock cone
+        # cos(theta) = z / sqrt(x^2 + y^2 + z^2)
+        # Solving for z:
+        numerator = cos_beta**2 * (x**2 + y**2)
+        denominator = 1 - cos_beta**2  # = sin^2(beta)
+        
+        if denominator < 1e-10:
+            return 0.0
+        
+        z = np.sqrt(numerator / denominator)
+        return z
+    
+    def _generate_leading_edge(self):
+        """Generate the 3D leading edge by projecting polynomial onto shock cone."""
+        # Get y-intercept (point at x=0)
+        y_intercept = self.poly_coeffs[-1]  # A_0 term
+        
+        # Find z coordinate at x=0
+        z_start = self._project_to_shock_cone(0, y_intercept)
+        z_end = z_start + self.length
+        
+        # Find x_max by solving where the leading edge reaches z_end
+        # This requires finding where the projected curve reaches the base plane
+        def find_x_end(x):
+            y = self._polynomial_leading_edge(x)
+            z = self._project_to_shock_cone(x, y)
+            return z - z_end
+        
+        # Binary search for x_end
+        x_low, x_high = 0.0, 10.0
+        for _ in range(100):
+            x_mid = (x_low + x_high) / 2
+            if find_x_end(x_mid) < 0:
+                x_low = x_mid
+            else:
+                x_high = x_mid
+        x_end = x_mid
+        
+        # Generate leading edge points (positive x side)
+        n_half = (self.n_leading_edge - 1) // 2
+        x_positive = np.linspace(0, x_end, n_half + 1)
+        
+        # Build full leading edge (symmetric about x=0)
+        x_negative = -x_positive[1:][::-1]
+        x_full = np.concatenate([x_negative, x_positive])
+        
+        # Compute y and z for each point
+        leading_edge = []
+        for x in x_full:
+            y = self._polynomial_leading_edge(abs(x)) if x != 0 else self.poly_coeffs[-1]
+            z = self._project_to_shock_cone(x, y)
+            leading_edge.append([x, y, z])
+        
+        self.leading_edge = np.array(leading_edge)
+        self.z_start = z_start
+        self.z_end = z_end
+        self.x_end = x_end
+    
+    def _cart_to_sphere(self, x: float, y: float, z: float) -> Tuple[float, float, float]:
+        """Convert Cartesian to spherical coordinates."""
+        r = np.sqrt(x**2 + y**2 + z**2)
+        if r < 1e-12:
+            return 0, 0, 0
+        theta = np.arccos(z / r)
+        phi = np.arctan2(y, x)
+        return r, theta, phi
+    
+    def _sphere_to_cart(self, r: float, theta: float, phi: float) -> Tuple[float, float, float]:
+        """Convert spherical to Cartesian coordinates."""
+        x = r * np.sin(theta) * np.cos(phi)
+        y = r * np.sin(theta) * np.sin(phi)
+        z = r * np.cos(theta)
+        return x, y, z
+    
+    def _streamline_ode(self, t, y):
+        """
+        ODE for streamline tracing in spherical coordinates.
+        
+        Parameters
+        ----------
+        t : float
+            Integration parameter
+        y : array
+            [r, theta] position
+            
+        Returns
+        -------
+        dydt : array
+            [dr/dt, dtheta/dt]
+        """
+        r, theta = y
+        
+        # Get velocity at this theta
+        Vr, Vtheta = self._get_velocity_at_theta(theta)
+        
+        dr_dt = Vr
+        if r > 1e-10:
+            dtheta_dt = Vtheta / r
+        else:
+            dtheta_dt = 0
+        
+        return [dr_dt, dtheta_dt]
+    
+    def _trace_streamline(self, start_point: np.ndarray, target_z: float) -> np.ndarray:
+        """
+        Trace a streamline from start_point until z reaches target_z.
+        
+        Parameters
+        ----------
+        start_point : array
+            Starting [x, y, z] position
+        target_z : float
+            Target z coordinate
+            
+        Returns
+        -------
+        streamline : array
+            Array of [x, y, z] points along streamline
+        """
+        x0, y0, z0 = start_point
+        r0, theta0, phi0 = self._cart_to_sphere(x0, y0, z0)
+        
+        # Estimate integration time
+        dz = target_z - z0
+        estimated_steps = max(100, int(dz * 50))
+        
+        # Create event to stop at target z
+        def reach_target_z(t, y):
+            r, theta = y
+            _, _, z = self._sphere_to_cart(r, theta, phi0)
+            return z - target_z
+        reach_target_z.terminal = True
+        reach_target_z.direction = 1
+        
+        # Integrate streamline
+        t_span = (0, 100)  # Large enough span
+        y0 = [r0, theta0]
+        
+        sol = solve_ivp(
+            self._streamline_ode,
+            t_span,
+            y0,
+            events=reach_target_z,
+            dense_output=True,
+            max_step=0.01
+        )
+        
+        # Extract points along streamline
+        if sol.t_events[0].size > 0:
+            t_final = sol.t_events[0][0]
+        else:
+            t_final = sol.t[-1]
+        
+        t_eval = np.linspace(0, t_final, self.n_streamwise)
+        
+        streamline = []
+        for t in t_eval:
+            r, theta = sol.sol(t)
+            x, y, z = self._sphere_to_cart(r, theta, phi0)
+            streamline.append([x, y, z])
+        
+        return np.array(streamline)
+    
+    def _trace_lower_surface(self):
+        """Trace streamlines from each leading edge point to create lower surface."""
+        lower_surface = []
+        
+        for le_point in self.leading_edge:
+            streamline = self._trace_streamline(le_point, self.z_end)
+            lower_surface.append(streamline)
+        
+        self.lower_surface = np.array(lower_surface)
+    
+    def _build_cross_section_spline(self):
+        """
+        Build a CubicSpline for the upper-surface dome cross-section profile.
+
+        Returns a callable f(span_frac) -> height_offset, where:
+            span_frac: 0.0 (centerline) to 1.0 (wingtip)
+            height_offset: vertical offset to add to upper surface
+
+        Boundary conditions:
+            f(1.0) = 0     (no offset at wingtip — matches LE)
+            f'(0.0) = 0    (zero slope at centerline for symmetry)
+        """
+        # Sort control points by span fraction
+        points = sorted(self.upper_surface_spline, key=lambda p: p[0])
+
+        # Filter out any user point at span>=1.0 and add the fixed tip anchor
+        span_fracs = [p[0] for p in points if p[0] < 0.999]
+        heights = [p[1] for p in points if p[0] < 0.999]
+
+        # Deduplicate: keep last value for each unique span fraction
+        unique = {}
+        for s, h in zip(span_fracs, heights):
+            unique[round(s, 6)] = h
+        span_fracs = sorted(unique.keys())
+        heights = [unique[s] for s in span_fracs]
+
+        # Add fixed tip anchor (zero offset at wingtip)
+        span_fracs.append(1.0)
+        heights.append(0.0)
+
+        span_fracs = np.array(span_fracs)
+        heights = np.array(heights)
+
+        # Need at least 2 points for CubicSpline
+        if len(span_fracs) < 2:
+            return lambda s: 0.0
+
+        # CubicSpline: zero slope at centerline (symmetry), natural at tip
+        return CubicSpline(span_fracs, heights,
+                           bc_type=((1, 0.0), 'natural'))
+
+    def _build_volume_loft_spline(self):
+        """
+        Build a CubicSpline for the volume loft back-face profile.
+
+        Returns a callable f(span_frac) -> height_offset, where:
+            span_frac: 0.0 (centerline) to 1.0 (wingtip)
+            height_offset: vertical offset to add to upper surface
+
+        Boundary conditions (same as dome):
+            f(1.0) = 0     (no offset at wingtip — meets original surface)
+            f'(0.0) = 0    (zero slope at centerline — tangency/symmetry)
+        """
+        if not self.volume_loft_spline or len(self.volume_loft_spline) == 0:
+            return None
+
+        # Sort control points by span fraction
+        points = sorted(self.volume_loft_spline, key=lambda p: p[0])
+
+        # Filter out any point at span >= 1.0 and add fixed tip anchor
+        span_fracs = [p[0] for p in points if p[0] < 0.999]
+        heights = [p[1] for p in points if p[0] < 0.999]
+
+        # Deduplicate: keep last value for each unique span fraction
+        unique = {}
+        for s, h in zip(span_fracs, heights):
+            unique[round(s, 6)] = h
+        span_fracs = sorted(unique.keys())
+        heights = [unique[s] for s in span_fracs]
+
+        # Add fixed tip anchor (zero offset at wingtip)
+        span_fracs.append(1.0)
+        heights.append(0.0)
+
+        span_fracs = np.array(span_fracs)
+        heights = np.array(heights)
+
+        # Need at least 2 points for CubicSpline
+        if len(span_fracs) < 2:
+            return None
+
+        # CubicSpline: zero slope at centerline (tangency), natural at tip
+        return CubicSpline(span_fracs, heights,
+                           bc_type=((1, 0.0), 'natural'))
+
+    def _generate_upper_surface(self):
+        """
+        Generate upper surface.
+
+        When top_surface_control == 0 (default), produces a flat freestream
+        upper surface matching the thesis.
+
+        When top_surface_control > 0, applies exponential lifting from
+        CoDe WAVE v2.0: y += |y_LE| * (exp(A/100 * dz) - 1)
+
+        When upper_surface_spline is set, applies a dome-shaped offset
+        that varies across the span (max at center, zero at tips) and
+        grows linearly from LE to TE.
+        """
+        A = self.top_surface_control
+        upper_surface = []
+
+        # Build spline interpolator for dome profile (if enabled)
+        spline_func = None
+        if self.upper_surface_spline and len(self.upper_surface_spline) > 0:
+            spline_func = self._build_cross_section_spline()
+
+        # Build spline interpolator for volume loft (if enabled)
+        vol_loft_func = self._build_volume_loft_spline()
+
+        # Compute span normalization from LE points
+        x_positions = self.leading_edge[:, 0]  # internal X = span
+        x_max = np.max(np.abs(x_positions))
+
+        # Pre-compute TE baseline Y (before dome/loft) for each LE station.
+        # Stored for overlay visualization so it can show offsets relative
+        # to the original surface, not the already-modified surface.
+        te_baseline_sf = []
+        te_baseline_y = []
+        for le_pt in self.leading_edge:
+            x_s, y_s, z_s = le_pt
+            sf = abs(x_s) / x_max if x_max > 1e-10 else 0.0
+            if A == 0.0:
+                y_te = y_s
+            else:
+                dz = self.z_end - z_s
+                y_te = y_s + abs(y_s) * (np.exp((A / 100.0) * dz) - 1.0)
+            te_baseline_sf.append(sf)
+            te_baseline_y.append(y_te)
+        self._te_baseline_sf = np.array(te_baseline_sf)
+        self._te_baseline_y = np.array(te_baseline_y)
+
+        for i, le_point in enumerate(self.leading_edge):
+            x_start, y_start, z_start = le_point
+
+            z_vals = np.linspace(z_start, self.z_end, self.n_streamwise)
+
+            # Span fraction for this station (0 = center, 1 = tip)
+            span_frac = abs(x_start) / x_max if x_max > 1e-10 else 0.0
+
+            streamline = []
+            for j, z in enumerate(z_vals):
+                # Base Y: flat or exponential
+                if A == 0.0:
+                    y = y_start
+                else:
+                    dz = z - z_start
+                    y = y_start + abs(y_start) * (np.exp((A / 100.0) * dz) - 1.0)
+
+                # Apply spline dome offset (additive)
+                if spline_func is not None:
+                    growth = j / max(self.n_streamwise - 1, 1)  # 0 at LE, 1 at TE
+                    sf = min(max(span_frac, 0.0), 1.0)  # clamp to [0, 1]
+                    offset = float(spline_func(sf))
+                    y += max(offset, 0.0) * growth  # only add positive offsets
+
+                # Apply volume loft offset (additive, after dome)
+                if vol_loft_func is not None:
+                    sf = min(max(span_frac, 0.0), 1.0)
+                    vol_offset = float(vol_loft_func(sf))
+                    t = j / max(self.n_streamwise - 1, 1)
+                    if self.volume_loft_growth == 'smooth':
+                        vol_growth = 6*t**5 - 15*t**4 + 10*t**3  # smootherstep
+                    else:
+                        vol_growth = t  # linear
+                    y += max(vol_offset, 0.0) * vol_growth
+
+                streamline.append([x_start, y, z])
+
+            upper_surface.append(streamline)
+
+        # Clamp to shock cone boundary
+        if spline_func is not None or vol_loft_func is not None:
+            clamped = 0
+            for i in range(len(upper_surface)):
+                for j in range(len(upper_surface[i])):
+                    x, y, z = upper_surface[i][j]
+                    if z > 1e-10:
+                        R_shock = z * np.tan(self.shock_angle_rad)
+                        y_max = np.sqrt(max(R_shock**2 - x**2, 0))
+                        if y > y_max:
+                            upper_surface[i][j][1] = y_max * 0.98
+                            clamped += 1
+            if clamped > 0:
+                warnings.warn(
+                    f"Upper surface: {clamped} points clamped to "
+                    f"stay within shock cone. Consider reducing dome/loft height.")
+
+        self.upper_surface = np.array(upper_surface)
+    
+    def _compute_geometry_metrics(self):
+        """
+        Compute geometric properties of the waverider.
+        
+        After coordinate transformation:
+        X = streamwise, Y = vertical, Z = span
+        """
+        # Planform area (projection onto X-Z plane)
+        # Integrate actual local chord (te_x - le_x) across the span
+        chord_lengths = []
+        z_positions = []
+        for i in range(len(self.upper_surface)):
+            le_x = self.upper_surface[i, 0, 0]   # X at leading edge
+            te_x = self.upper_surface[i, -1, 0]  # X at trailing edge
+            chord_lengths.append(te_x - le_x)
+            z_positions.append(self.leading_edge[i, 2])
+
+        chords = np.array(chord_lengths)
+        z_pos = np.array(z_positions)
+
+        try:
+            self.planform_area = abs(np.trapezoid(chords, z_pos))
+        except AttributeError:
+            self.planform_area = abs(np.trapz(chords, z_pos))
+        
+        # Volume (simplified estimate using cross-sections)
+        self.volume = self._estimate_volume()
+        
+        # Mean aerodynamic chord
+        self.mac = self._compute_mac()
+        
+        # Center of gravity
+        self.cg = self._compute_cg()
+    
+    def _estimate_volume(self) -> float:
+        """
+        Calculate internal volume using cross-sectional area integration.
+        
+        Computes the area between upper and lower surfaces at each streamwise
+        station, then integrates along the streamwise direction.
+        
+        Returns
+        -------
+        volume : float
+            Internal volume in m³
+        """
+        n_span = self.upper_surface.shape[0]
+        n_stream = self.upper_surface.shape[1]
+        
+        if n_span == 0 or n_stream == 0:
+            return 0.0
+        
+        areas = []
+        x_positions = []
+        
+        # Use centerline (middle span index) for X positions
+        # because X varies differently at each span station due to sweep
+        center_idx = n_span // 2
+        
+        # For each streamwise station, compute cross-sectional area
+        for j in range(n_stream):
+            # Get x position at centerline for this streamwise station
+            x_pos = self.upper_surface[center_idx, j, 0]
+            x_positions.append(x_pos)
+            
+            # Get Y and Z coordinates at this streamwise station
+            y_upper = self.upper_surface[:, j, 1]  # Shape: (n_span,)
+            z_upper = self.upper_surface[:, j, 2]
+            y_lower = self.lower_surface[:, j, 1]
+            z_lower = self.lower_surface[:, j, 2]
+            
+            # Compute height between surfaces at each spanwise position
+            height = np.abs(y_upper - y_lower)
+            
+            # Integrate across span using trapezoidal rule
+            # Need to sort by z for proper integration
+            sort_idx = np.argsort(z_upper)
+            z_sorted = z_upper[sort_idx]
+            height_sorted = height[sort_idx]
+            
+            try:
+                area = np.trapezoid(height_sorted, z_sorted)
+            except AttributeError:
+                area = np.trapz(height_sorted, z_sorted)
+            
+            areas.append(abs(area))
+        
+        if len(areas) < 2:
+            return 0.0
+        
+        # Integrate areas along streamwise direction
+        try:
+            volume = np.trapezoid(areas, x_positions)
+        except AttributeError:
+            volume = np.trapz(areas, x_positions)
+        
+        return abs(volume)
+    
+    def _compute_mac(self) -> float:
+        """
+        Compute mean aerodynamic chord using thesis formula:
+        mac = (2/S) * integral(c^2 dz)
+
+        where S is planform area, c is local chord, and z is span position.
+        """
+        chord_lengths = []
+        z_positions = []
+
+        for i in range(len(self.upper_surface)):
+            le_x = self.upper_surface[i, 0, 0]   # X at leading edge
+            te_x = self.upper_surface[i, -1, 0]  # X at trailing edge
+            chord = te_x - le_x
+            chord_lengths.append(chord)
+            z_positions.append(self.leading_edge[i, 2])  # span position
+
+        chords = np.array(chord_lengths)
+        z_pos = np.array(z_positions)
+
+        # Integrate c^2 over half-span and multiply by 2 for symmetry
+        half = len(chords) // 2
+        try:
+            integral = np.trapezoid(chords[half:]**2, z_pos[half:])
+        except AttributeError:
+            integral = np.trapz(chords[half:]**2, z_pos[half:])
+
+        S = max(self.planform_area, 1e-10)
+        mac = (2.0 / S) * abs(integral)
+
+        return max(mac, 1e-6)
+    
+    def _compute_cg(self) -> np.ndarray:
+        """
+        Compute estimated center of gravity location.
+
+        Uses thesis convention: CG at 0.75*MAC upstream from the base
+        (trailing edge), i.e. cg_x = x_end - 0.75*mac.
+
+        After coordinate transformation:
+        X = streamwise, Y = vertical, Z = span
+        """
+        # Thesis: CG at 0.75*MAC upstream from base (trailing edge)
+        cg_x = self.x_end - 0.75 * self.mac
+
+        # Find y at centerline (z=0)
+        center_idx = len(self.upper_surface) // 2
+
+        # Average y between upper and lower at CG x location
+        frac = (cg_x - self.x_start) / (self.x_end - self.x_start)
+        frac = np.clip(frac, 0, 1)
+        idx = int(frac * (self.n_streamwise - 1))
+
+        y_upper = self.upper_surface[center_idx, idx, 1]
+        y_lower = self.lower_surface[center_idx, idx, 1]
+        cg_y = (y_upper + y_lower) / 2
+
+        # CG is at centerline (z=0), at cg_x streamwise, at average y
+        return np.array([cg_x, cg_y, 0.0])
+    
+    def get_mesh(self) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Generate triangular mesh for the waverider surface.
+        
+        Returns
+        -------
+        vertices : array
+            Nx3 array of vertex coordinates
+        triangles : array
+            Mx3 array of vertex indices forming triangles
+        """
+        vertices = []
+        triangles = []
+        
+        n_span = len(self.upper_surface)
+        n_stream = self.n_streamwise
+        
+        # Add upper surface vertices
+        for i in range(n_span):
+            for j in range(n_stream):
+                vertices.append(self.upper_surface[i, j, :])
+        
+        # Add lower surface vertices (excluding leading edge which is shared)
+        lower_start_idx = len(vertices)
+        for i in range(n_span):
+            for j in range(1, n_stream):  # Skip j=0 (leading edge)
+                vertices.append(self.lower_surface[i, j, :])
+        
+        vertices = np.array(vertices)
+        
+        # Generate triangles for upper surface
+        for i in range(n_span - 1):
+            for j in range(n_stream - 1):
+                # Upper surface indices
+                v00 = i * n_stream + j
+                v01 = i * n_stream + j + 1
+                v10 = (i + 1) * n_stream + j
+                v11 = (i + 1) * n_stream + j + 1
+                
+                # Two triangles per quad (counter-clockwise for outward normal)
+                triangles.append([v00, v10, v01])
+                triangles.append([v01, v10, v11])
+        
+        # Generate triangles for lower surface
+        lower_n_stream = n_stream - 1  # One less because we skip leading edge
+        for i in range(n_span - 1):
+            for j in range(lower_n_stream - 1):
+                # Lower surface indices
+                v00 = lower_start_idx + i * lower_n_stream + j
+                v01 = lower_start_idx + i * lower_n_stream + j + 1
+                v10 = lower_start_idx + (i + 1) * lower_n_stream + j
+                v11 = lower_start_idx + (i + 1) * lower_n_stream + j + 1
+                
+                # Two triangles per quad (clockwise for inward normal on lower surface)
+                triangles.append([v00, v01, v10])
+                triangles.append([v01, v11, v10])
+        
+        # Connect leading edge (upper and lower surfaces share leading edge vertices)
+        for i in range(n_span - 1):
+            upper_le_0 = i * n_stream
+            upper_le_1 = (i + 1) * n_stream
+            lower_first_0 = lower_start_idx + i * lower_n_stream
+            lower_first_1 = lower_start_idx + (i + 1) * lower_n_stream
+            
+            triangles.append([upper_le_0, lower_first_0, upper_le_1])
+            triangles.append([upper_le_1, lower_first_0, lower_first_1])
+        
+        # Generate base surface triangles
+        base_triangles = self._generate_base_triangles(n_span, n_stream, lower_start_idx, lower_n_stream)
+        triangles.extend(base_triangles)
+        
+        triangles = np.array(triangles)
+        
+        return vertices, triangles
+    
+    def _generate_base_triangles(self, n_span, n_stream, lower_start_idx, lower_n_stream):
+        """Generate triangles for the base (trailing edge) surface."""
+        base_triangles = []
+        
+        for i in range(n_span - 1):
+            # Upper surface trailing edge
+            upper_te_0 = i * n_stream + (n_stream - 1)
+            upper_te_1 = (i + 1) * n_stream + (n_stream - 1)
+            
+            # Lower surface trailing edge
+            lower_te_0 = lower_start_idx + i * lower_n_stream + (lower_n_stream - 1)
+            lower_te_1 = lower_start_idx + (i + 1) * lower_n_stream + (lower_n_stream - 1)
+            
+            # Two triangles to close the base
+            base_triangles.append([upper_te_0, upper_te_1, lower_te_0])
+            base_triangles.append([upper_te_1, lower_te_1, lower_te_0])
+        
+        return base_triangles
+    
+    def export_tri(self, filename: str):
+        """
+        Export mesh in NASA Cart3D TRI format.
+        
+        Parameters
+        ----------
+        filename : str
+            Output filename (should end in .tri)
+        """
+        vertices, triangles = self.get_mesh()
+        
+        n_vertices = len(vertices)
+        n_triangles = len(triangles)
+        
+        with open(filename, 'w') as f:
+            f.write(f"{n_vertices}\n")
+            f.write(f"{n_triangles}\n")
+            
+            for v in vertices:
+                f.write(f"{v[0]:.8f} {v[1]:.8f} {v[2]:.8f}\n")
+            
+            for t in triangles:
+                # TRI format uses 1-based indexing
+                f.write(f"{t[0]+1} {t[1]+1} {t[2]+1}\n")
+    
+    def export_stl(self, filename: str):
+        """
+        Export mesh in STL format.
+        
+        Parameters
+        ----------
+        filename : str
+            Output filename (should end in .stl)
+        """
+        vertices, triangles = self.get_mesh()
+        
+        with open(filename, 'w') as f:
+            f.write("solid waverider\n")
+            
+            for tri in triangles:
+                v0, v1, v2 = vertices[tri[0]], vertices[tri[1]], vertices[tri[2]]
+                
+                # Compute normal
+                e1 = v1 - v0
+                e2 = v2 - v0
+                normal = np.cross(e1, e2)
+                norm = np.linalg.norm(normal)
+                if norm > 1e-10:
+                    normal = normal / norm
+                else:
+                    normal = np.array([0, 0, 1])
+                
+                f.write(f"  facet normal {normal[0]:.6e} {normal[1]:.6e} {normal[2]:.6e}\n")
+                f.write("    outer loop\n")
+                f.write(f"      vertex {v0[0]:.6e} {v0[1]:.6e} {v0[2]:.6e}\n")
+                f.write(f"      vertex {v1[0]:.6e} {v1[1]:.6e} {v1[2]:.6e}\n")
+                f.write(f"      vertex {v2[0]:.6e} {v2[1]:.6e} {v2[2]:.6e}\n")
+                f.write("    endloop\n")
+                f.write("  endfacet\n")
+            
+            f.write("endsolid waverider\n")
+    
+    def get_reference_values(self, scale: float = 1.0) -> dict:
+        """
+        Get reference values for aerodynamic analysis.
+        
+        Parameters
+        ----------
+        scale : float
+            Scale factor to apply (e.g., 60 for 60m waverider)
+            
+        Returns
+        -------
+        refs : dict
+            Dictionary containing reference length, area, and CG location
+        """
+        return {
+            'length': self.length * scale,
+            'area': self.planform_area * scale**2,
+            'cg': self.cg * scale,
+            'mac': self.mac * scale,
+            'cone_angle': self.cone_angle_deg,
+            'shock_angle': self.shock_angle,
+            'mach': self.mach
+        }
+    
+    def summary(self):
+        """Print summary of waverider geometry."""
+        print("=" * 50)
+        print("Cone-Derived Waverider Summary")
+        print("=" * 50)
+        print(f"Mach Number:        {self.mach:.2f}")
+        print(f"Shock Angle:        {self.shock_angle:.2f}°")
+        print(f"Cone Angle:         {self.cone_angle_deg:.2f}°")
+        print(f"Deflection Angle:   {np.degrees(self.deflection_angle):.2f}°")
+        print(f"Post-shock Mach:    {self.post_shock_mach:.2f}")
+        print("-" * 50)
+        print(f"Length:             {self.length:.4f}")
+        print(f"Planform Area:      {self.planform_area:.4f}")
+        print(f"Volume:             {self.volume:.4f}")
+        print(f"MAC:                {self.mac:.4f}")
+        print(f"CG Location:        [{self.cg[0]:.4f}, {self.cg[1]:.4f}, {self.cg[2]:.4f}]")
+        print("-" * 50)
+        print(f"Polynomial Order:   {self.poly_order}")
+        print(f"Polynomial Coeffs:  {self.poly_coeffs}")
+        print(f"Top Surface A:      {self.top_surface_control:.1f}")
+        print(f"Leading Edge Pts:   {self.n_leading_edge}")
+        print(f"Streamwise Pts:     {self.n_streamwise}")
+        print("=" * 50)
+
+
+def create_second_order_waverider(
+    mach: float,
+    shock_angle: float,
+    A2: float,
+    A0: float,
+    **kwargs
+) -> ShadowWaverider:
+    """
+    Create a waverider with second-order polynomial leading edge.
+    
+    y = A2 * x^2 + A0
+    
+    Parameters
+    ----------
+    mach : float
+        Freestream Mach number
+    shock_angle : float
+        Shock cone angle in degrees
+    A2 : float
+        Quadratic coefficient (controls curvature)
+    A0 : float
+        Y-intercept (vertical offset at centerline)
+    **kwargs
+        Additional arguments passed to ShadowWaverider
+        
+    Returns
+    -------
+    waverider : ShadowWaverider
+        Generated waverider object
+    """
+    # Second order polynomial: y = A2*x^2 + 0*x + A0
+    # Linear term must be 0 for smooth y-axis symmetry
+    poly_coeffs = [A2, 0.0, A0]
+    
+    return ShadowWaverider(
+        mach=mach,
+        shock_angle=shock_angle,
+        poly_coeffs=poly_coeffs,
+        **kwargs
+    )
+
+
+def create_third_order_waverider(
+    mach: float,
+    shock_angle: float,
+    A3: float,
+    A2: float,
+    A0: float,
+    **kwargs
+) -> ShadowWaverider:
+    """
+    Create a waverider with third-order polynomial leading edge.
+    
+    y = A3 * x^3 + A2 * x^2 + A0
+    
+    Note: The linear term (A1) is set to 0 for y-axis symmetry.
+    
+    Parameters
+    ----------
+    mach : float
+        Freestream Mach number
+    shock_angle : float
+        Shock cone angle in degrees
+    A3 : float
+        Cubic coefficient
+    A2 : float
+        Quadratic coefficient
+    A0 : float
+        Y-intercept
+    **kwargs
+        Additional arguments passed to ShadowWaverider
+        
+    Returns
+    -------
+    waverider : ShadowWaverider
+        Generated waverider object
+    """
+    # Third order polynomial: y = A3*x^3 + A2*x^2 + 0*x + A0
+    poly_coeffs = [A3, A2, 0.0, A0]
+    
+    return ShadowWaverider(
+        mach=mach,
+        shock_angle=shock_angle,
+        poly_coeffs=poly_coeffs,
+        **kwargs
+    )
+
+
+# Convenience function to get optimal shock angle for a given Mach number
+def optimal_shock_angle(mach: float, gamma: float = 1.4) -> float:
+    """
+    Estimate optimal shock angle for maximum L/D for SHADOW waveriders.
+    
+    Based on empirical relationship from waverider literature.
+    Note: SHADOW waveriders have different constraints than X1-X4 osculating
+    cone waveriders, so they use different recommended shock angles.
+    
+    Parameters
+    ----------
+    mach : float
+        Freestream Mach number
+    gamma : float
+        Ratio of specific heats
+        
+    Returns
+    -------
+    beta : float
+        Recommended shock angle in degrees
+    """
+    # Mach angle
+    mu = np.degrees(np.arcsin(1.0 / mach))
+    
+    # Empirical relationship: optimal shock is ~1.1-1.3x Mach angle
+    # This varies with Mach number
+    if mach < 6:
+        factor = 1.3
+    elif mach < 10:
+        factor = 1.25
+    elif mach < 15:
+        factor = 1.2
+    else:
+        factor = 1.15
+    
+    return mu * factor
+
+
+if __name__ == "__main__":
+    # Example usage
+    print("Creating Mach 6 cone-derived waverider...")
+    
+    # Default parameters similar to Adam's thesis
+    waverider = create_second_order_waverider(
+        mach=6.0,
+        shock_angle=12.0,
+        A2=-2.0,
+        A0=-0.15,
+        n_leading_edge=21,
+        n_streamwise=20
+    )
+    
+    waverider.summary()
+    
+    # Export mesh
+    waverider.export_stl("waverider_test.stl")
+    waverider.export_tri("waverider_test.tri")
+    
+    print("\nMesh exported to waverider_test.stl and waverider_test.tri")

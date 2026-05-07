@@ -1,0 +1,90 @@
+{
+  "_comment": "PSWR-1 species thermodynamic data. Sources: Park 1990 'Nonequilibrium Hypersonic Aerothermodynamics' Table 1; Huber & Herzberg 1979; NIST WebBook. Units: mass in u, theta in K, energies in eV.",
+  "species": {
+    "N2": {
+      "mass_u": 28.0134,
+      "is_atom": false,
+      "theta_rot_K": 2.88,
+      "theta_vib_K": 3393.5,
+      "sigma_sym": 2,
+      "g_electronic": 1,
+      "comment": "X^1 Sigma_g+ ground state"
+    },
+    "O2": {
+      "mass_u": 31.9988,
+      "is_atom": false,
+      "theta_rot_K": 2.07,
+      "theta_vib_K": 2273.5,
+      "sigma_sym": 2,
+      "g_electronic": 3,
+      "comment": "X^3 Sigma_g- triplet ground state"
+    },
+    "NO": {
+      "mass_u": 30.0061,
+      "is_atom": false,
+      "theta_rot_K": 2.45,
+      "theta_vib_K": 2739.7,
+      "sigma_sym": 1,
+      "g_electronic": 4,
+      "comment": "X^2 Pi ground state, two Omega substates each doubly degenerate"
+    },
+    "N": {
+      "mass_u": 14.0067,
+      "is_atom": true,
+      "g_electronic": 4,
+      "comment": "^4 S_{3/2} ground; ^2D ~19224K, ^2P ~28840K excluded"
+    },
+    "O": {
+      "mass_u": 15.9994,
+      "is_atom": true,
+      "g_electronic": 9,
+      "comment": "^3P ground (J=0,1,2 -> 1+3+5=9); ^1D ~22830K, ^1S ~48750K excluded"
+    },
+    "NO+": {
+      "mass_u": 30.0056,
+      "is_atom": false,
+      "theta_rot_K": 2.74,
+      "theta_vib_K": 3008.0,
+      "sigma_sym": 1,
+      "g_electronic": 1,
+      "comment": "X^1 Sigma+ singlet ground state"
+    },
+    "e-": {
+      "mass_u": 5.4858e-4,
+      "is_atom": true,
+      "g_electronic": 2,
+      "comment": "spin-1/2"
+    }
+  },
+  "reactions": {
+    "N2_dissociation": {
+      "reactants": [["N2", 1]],
+      "products":  [["N", 2]],
+      "delta_E_eV": 9.7563,
+      "comment": "D_0(N2) Huber & Herzberg 1979"
+    },
+    "O2_dissociation": {
+      "reactants": [["O2", 1]],
+      "products":  [["O", 2]],
+      "delta_E_eV": 5.1156,
+      "comment": "D_0(O2)"
+    },
+    "NO_dissociation": {
+      "reactants": [["NO", 1]],
+      "products":  [["N", 1], ["O", 1]],
+      "delta_E_eV": 6.4974,
+      "comment": "D_0(NO)"
+    },
+    "NO_ionization": {
+      "reactants": [["NO", 1]],
+      "products":  [["NO+", 1], ["e-", 1]],
+      "delta_E_eV": 9.2641,
+      "comment": "Ionization potential of NO (lowest in air)"
+    }
+  },
+  "air_atom_fractions": {
+    "X_N": 0.788,
+    "X_O": 0.212,
+    "_comment": "Atom-count mole fractions: 2*0.78 N atoms + 2*0.21 O atoms per mol of dry air"
+  }
+}
