@@ -161,15 +161,44 @@ WADOS bundles a vendored copy of [PySAGAS](https://github.com/kieran-mackle/hypy
 The vendored copy guarantees the GUI works against the exact internals
 it was developed against; install from PyPI if you only need the solver.
 
-Method references are listed in each method's tab module header. Key
-papers:
+## References
 
-- Liu et al., *Acta Astronautica* **162** (2019) — variable-Mach
-  osculating flowfield method (VMOF / MFOF).
-- Li et al. (2018) — variable-Mach-number wide-speed-range design (VMN).
-- Sobieczky (1990) / Rodi — osculating-cone framework.
-- Nonweiler — caret waverider reference geometry.
-- Tauber & Sutton (1991) — convective heating correlation.
+The methods implemented in WADOS draw on the following works:
+
+1. **Liu, J., Hou, Z., Chen, X., & Zhang, J. (2019).** Novel osculating
+   flowfield methodology for wide-speed-range waverider vehicles across
+   variable Mach numbers. *Acta Astronautica*, **162**, 160–167.
+   [doi:10.1016/j.actaastro.2019.06.004](https://doi.org/10.1016/j.actaastro.2019.06.004)
+   — basis of the VMOF / Liu 2019 / MFOF tabs.
+
+2. **Kontogiannis, K., Sóbester, A., & Taylor, N. (2017).** Efficient
+   parameterization of waverider geometries. *Journal of Aircraft*,
+   **54**(3).
+   [doi:10.2514/1.C033902](https://doi.org/10.2514/1.C033902)
+   — geometry parameterisation strategies.
+
+3. **Son, J., Son, C., & Yee, K. (2022).** A novel direct optimization
+   framework for hypersonic waverider inverse design methods.
+   *Aerospace*, **9**(7), 348.
+   [doi:10.3390/aerospace9070348](https://doi.org/10.3390/aerospace9070348)
+   — inverse-design optimisation approach.
+
+4. **Weaver, A. S. (2025).** *Investigating Stability of Cone-Derived
+   Hypersonic Waverider Vehicles via Design Space Exploration.*
+   Master's Thesis, Utah State University.
+   [digitalcommons.usu.edu/etd2023/485](https://digitalcommons.usu.edu/etd2023/485)
+   — cone-derived waverider stability analysis (Cone-derived / SHADOW tab).
+
+5. **Mackle, K., & Jahn, I. (2024).** Efficient and flexible methodology
+   for the aerodynamic shape optimisation of hypersonic vehicle concepts
+   in a high-dimensional design space. *AIAA SCITECH 2024 Forum*, p. 2838.
+   [doi:10.2514/6.2024-2838](https://doi.org/10.2514/6.2024-2838)
+   — author of PySAGAS, the panel-method aero solver vendored here.
+
+Additional references (cited in individual module headers): Sobieczky
+(1990) and Rodi (osculating-cone framework); Nonweiler (caret reference
+geometry); Li et al. (2018, VMN); Tauber & Sutton (1991, convective
+heating).
 
 ---
 
