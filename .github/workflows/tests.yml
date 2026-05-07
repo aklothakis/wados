@@ -33,6 +33,7 @@ jobs:
           pip install numpy scipy pandas matplotlib scikit-learn pytest pyyaml
           # Vendored aero solver dependencies
           pip install numpy-stl trimesh
+	  pip install -e ./pysagas
 
       - name: Run GVWD test suite
         run: pytest gvwd/tests/ -q
